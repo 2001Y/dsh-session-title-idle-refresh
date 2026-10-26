@@ -45,3 +45,12 @@ idleMs 1800000 · scanMs 60000 · minMessages 2 · maxPerScan 3 ·
 targetWords 5 · targetCjkCharacters 10 · maxInputBytes 16384 ·
 maxOutputTokens 4096 · timeoutMs 60000. No provider/model is pinned:
 titles use each session's own logged route, like the stock provider.
+
+## Upstream
+
+This behavior is also implemented in-tree as a proposed third
+automatic mode () for the session-title service, on a fork
+branch of deepseek-ai/deepseek-harness (which currently does not
+accept external PRs; a Discussion proposal is being prepared):
+
+https://github.com/2001Y/deepseek-harness/tree/feat/session-title-idle-mode
