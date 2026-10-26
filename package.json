@@ -1,0 +1,38 @@
+{
+  "author": "Yoshiki Tamura",
+  "description": "DSH session-title provider that titles from all human messages (not just the first), plus idle retitling: sessions idle past a threshold get one refresh() so their title catches up with the conversation. Replaces the stock first-prompt provider.",
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "main": "lib/index.js",
+  "name": "dsh-session-title-idle-refresh",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-session-title": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-title-llm": "^0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session-title"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2001Y/dsh-session-title-idle-refresh.git"
+  }
+}
