@@ -1,0 +1,462 @@
+diff --git a/packages/experimental/session-title-all-prompts-llm/src/index.ts b/packages/experimental/session-title-all-prompts-llm/src/index.ts
+index a88ba636..8a46ba0a 100644
+--- a/packages/experimental/session-title-all-prompts-llm/src/index.ts
++++ b/packages/experimental/session-title-all-prompts-llm/src/index.ts
+@@ -8,6 +8,7 @@ import { assertNever } from '@deepseek-ai/dsh-util-values'
+ import {
+   normalizeSessionTitle,
+   SessionTitleProviderId,
++  type SessionTitleAutomaticMode,
+   type SessionTitleUserMessage,
+ } from '@deepseek-ai/dsh-session-title'
+ import {
+@@ -24,18 +25,29 @@ export const name = 'session-title-all-prompts-llm'
+ export const inject = ['sessionTitle', 'llm', 'sessions']
+ 
+ /* jscpd:ignore-start -- each provider owns its title-length targets and reasoning control. */
++/** Cadences this provider can register: per-prompt, or first-prompt plus idle sweeps. */
++export type AllPromptsAutomaticMode = Extract<SessionTitleAutomaticMode, 'all-prompts' | 'idle'>
++
+ /** Required execution controls plus this provider's title-length targets; no defaults. */
+ export interface Config extends SessionTitleLlmConfig {
+   /** Target word count for non-CJK titles. */
+   readonly targetWords: number
+   /** Target character count for Chinese, Japanese, or Korean titles. */
+   readonly targetCjkCharacters: number
++  /**
++   * Registration cadence. `all-prompts` (the default) regenerates on
++   * every human message; `idle` generates the initial title on the
++   * first message and lets the title service's idle sweep regenerate
++   * stale titles once a session has gone quiet.
++   */
++  readonly automatic?: AllPromptsAutomaticMode
+ }
+ 
+ /** Loader schema for this provider's required execution controls and title-length targets. */
+ export const Config: z<Config> = z.object({
+   targetWords: z.number().step(1).min(1).required(),
+   targetCjkCharacters: z.number().step(1).min(1).required(),
++  automatic: z.union(['all-prompts', 'idle'] as const),
+   maxInputBytes: SessionTitleLlmConfigFields.maxInputBytes,
+   maxOutputTokens: SessionTitleLlmConfigFields.maxOutputTokens,
+   timeoutMs: SessionTitleLlmConfigFields.timeoutMs,
+@@ -47,6 +59,7 @@ export const Config: z<Config> = z.object({
+ interface ResolvedConfig extends ResolvedSessionTitleLlmConfig {
+   readonly targetWords: number
+   readonly targetCjkCharacters: number
++  readonly automatic: AllPromptsAutomaticMode
+ }
+ 
+ /** Validate one positive title-length target. */
+@@ -63,11 +76,12 @@ function assertTarget(name: 'targetWords' | 'targetCjkCharacters', value: number
+  * @returns immutable provider policy.
+  */
+ function resolveConfig(config: Config): ResolvedConfig {
+-  const { targetWords, targetCjkCharacters, ...execution } = config
++  const { targetWords, targetCjkCharacters, automatic, ...execution } = config
+   return {
+     ...resolveSessionTitleLlmConfig(execution),
+     targetWords: assertTarget('targetWords', targetWords),
+     targetCjkCharacters: assertTarget('targetCjkCharacters', targetCjkCharacters),
++    automatic: automatic ?? 'all-prompts',
+   }
+ }
+ 
+@@ -156,7 +170,7 @@ export function apply(ctx: Context, config: Config): void {
+   const titleProvider = SessionTitleProviderId(name)
+   ctx.sessionTitle.register({
+     id: titleProvider,
+-    automatic: 'all-prompts',
++    automatic: resolved.automatic,
+     async generate(request) {
+       const messageSeqs = request.messages.map(message => message.seq)
+       const anchor = request.currentTitle?.source.kind === 'provider' ? request.currentTitle.title : undefined
+diff --git a/packages/session/session-title/package.json b/packages/session/session-title/package.json
+index f6d6f821..d6fe17cc 100644
+--- a/packages/session/session-title/package.json
++++ b/packages/session/session-title/package.json
+@@ -52,6 +52,7 @@
+   },
+   "devDependencies": {
+     "@deepseek-ai/cordis": "workspace:~",
++    "@deepseek-ai/cordis-plugin-timer": "workspace:~",
+     "@deepseek-ai/dsh-agent": "workspace:*",
+     "@deepseek-ai/dsh-agent-loop": "workspace:*",
+     "@deepseek-ai/dsh-brand": "workspace:*",
+diff --git a/packages/session/session-title/src/index.ts b/packages/session/session-title/src/index.ts
+index c80ae7e8..caa05cc7 100644
+--- a/packages/session/session-title/src/index.ts
++++ b/packages/session/session-title/src/index.ts
+@@ -60,6 +60,17 @@ export interface Config {
+   readonly fallbackMaxBytes: number
+   /** Maximum UTF-8 bytes in any accepted title. */
+   readonly maxTitleBytes: number
++  /**
++   * Idle time after which a stale title of an `idle`-mode provider is
++   * regenerated once. Defaults to 30 minutes when omitted.
++   */
++  readonly idleRefreshMs?: number
++  /**
++   * Interval between sweeps for idle `idle`-mode titles. Defaults to
++   * 60 seconds when omitted. Sweeps run only when a timer service is
++   * present in the context; hosts without one never sweep.
++   */
++  readonly idleScanMs?: number
+ }
+ 
+ declare module '@deepseek-ai/cordis' {
+@@ -88,8 +99,15 @@ export class SessionTitleInvalidError extends Error {
+   override readonly name = 'SessionTitleInvalidError'
+ }
+ 
+-/** Automatic generation cadence owned by a registered provider. */
+-export type SessionTitleAutomaticMode = 'first-prompt' | 'all-prompts'
++/**
++ * Automatic generation cadence owned by a registered provider.
++ * `first-prompt` generates once, from the first eligible message.
++ * `all-prompts` regenerates on every eligible message.
++ * `idle` generates once like `first-prompt`, then regenerates at most
++ * once per newly-ended conversation tail after the session has been
++ * idle for the service's `idleRefreshMs`.
++ */
++export type SessionTitleAutomaticMode = 'first-prompt' | 'all-prompts' | 'idle'
+ 
+ /** Immutable input supplied to one title-provider call. */
+ export interface SessionTitleProviderRequest {
+@@ -123,7 +141,10 @@ export interface SessionTitleProviderResult {
+ export interface SessionTitleProvider {
+   /** Stable id of the provider recorded with the title. */
+   readonly id: SessionTitleProviderId
+-  /** When new human prompts start automatic generation. */
++  /**
++   * When automatic generation starts: on the first human prompt, on
++   * every human prompt, or on the first human prompt plus idle sweeps.
++   */
+   readonly automatic: SessionTitleAutomaticMode
+   /**
+    * Produce one title revision.
+@@ -159,11 +180,20 @@ function copySessionTitleSource(source: SessionTitleSource): SessionTitleSource
+   }
+ }
+ 
++/** Default idle wait before a stale `idle`-mode title is regenerated: 30 minutes. */
++const DEFAULT_IDLE_REFRESH_MS = 30 * 60 * 1000
++/** Default interval between idle-title sweeps: 60 seconds. */
++const DEFAULT_IDLE_SCAN_MS = 60 * 1000
++/** Per-sweep cap on idle regenerations, so one sweep cannot fan out provider calls. */
++const MAX_IDLE_REFRESH_PER_SWEEP = 3
++
+ /** Service-owned resolved limits. */
+ interface ResolvedConfig {
+   readonly fallbackMaxWords: number
+   readonly fallbackMaxBytes: number
+   readonly maxTitleBytes: number
++  readonly idleRefreshMs: number
++  readonly idleScanMs: number
+ }
+ 
+ /** One exact provider registration generation. */
+@@ -192,6 +222,10 @@ interface SessionTitleWorkState {
+   fallback?: Promise<SessionTitleSnapshot | undefined>
+   pending?: PendingAutomaticWork
+   active?: ActiveProviderWork
++  /** Wall-clock time of the latest event observed for this session. */
++  lastEventAt?: number
++  /** Latest idle-sweep regeneration attempt: the tail it covered and when. */
++  idleAttempt?: { readonly throughSeq: SessionSeq; readonly at: number }
+ }
+ 
+ /** Validate one positive integer configuration field. */
+@@ -304,6 +338,8 @@ export class SessionTitleService extends Service {
+     fallbackMaxWords: z.number().step(1).min(1).required(),
+     fallbackMaxBytes: z.number().step(1).min(1).required(),
+     maxTitleBytes: z.number().step(1).min(1).required(),
++    idleRefreshMs: z.number().step(1).min(1),
++    idleScanMs: z.number().step(1).min(1),
+   })
+ 
+   private titleInputProjectionHandle!: ProjectionHandle<TitleInputState>
+@@ -325,10 +361,16 @@ export class SessionTitleService extends Service {
+     assertPositiveInteger('fallbackMaxWords', value.fallbackMaxWords)
+     assertPositiveInteger('fallbackMaxBytes', value.fallbackMaxBytes)
+     assertPositiveInteger('maxTitleBytes', value.maxTitleBytes)
++    if (value.idleRefreshMs !== undefined) assertPositiveInteger('idleRefreshMs', value.idleRefreshMs)
++    if (value.idleScanMs !== undefined) assertPositiveInteger('idleScanMs', value.idleScanMs)
+     if (value.fallbackMaxBytes > value.maxTitleBytes) {
+       throw new Error('session-title: fallbackMaxBytes must not exceed maxTitleBytes')
+     }
+-    this.config = deepFreeze({ ...value })
++    this.config = deepFreeze({
++      ...value,
++      idleRefreshMs: value.idleRefreshMs ?? DEFAULT_IDLE_REFRESH_MS,
++      idleScanMs: value.idleScanMs ?? DEFAULT_IDLE_SCAN_MS,
++    })
+   }
+ 
+   protected async [Service.init](): Promise<void> {
+@@ -347,6 +389,15 @@ export class SessionTitleService extends Service {
+ 
+     // oxlint-disable-next-line typescript/no-misused-promises -- session/event reports rejected observer promises without awaiting them.
+     ctx.on('session/event', (session, event) => {
++      // Idle sweeps measure from the latest observed event. Sessions with
++      // title work or title input are the only sweep candidates, so only
++      // their activity is tracked.
++      if (event.type === 'user/message') {
++        this.stateFor(session).lastEventAt = event.time
++      } else {
++        const tracked = this.work.get(session)
++        if (tracked !== undefined) tracked.lastEventAt = event.time
++      }
+       switch (event.type) {
+         case 'user/message':
+           return this.onUserMessage(session, event)
+@@ -357,6 +408,23 @@ export class SessionTitleService extends Service {
+           break
+       }
+     })
++
++    // The idle sweep is driven by the host's timer service when one is
++    // present (profile hosts load it). Contexts without a timer service
++    // accept `idle` providers but never sweep, so embedded use does not
++    // gain a hard timer dependency.
++    const timer = this.ctx.get('timer') as { interval?: unknown } | undefined
++    if (timer !== undefined && typeof timer.interval === 'function') {
++      const interval = timer.interval as (callback: () => void, delay: number) => unknown
++      ctx.effect(() => {
++        const dispose: unknown = interval.call(timer, () => {
++          void this.sweepIdleTitles()
++        }, this.config.idleScanMs)
++        return () => {
++          if (typeof dispose === 'function') (dispose as () => void)()
++        }
++      }, 'sessionTitle idle sweep')
++    }
+     ctx.on('llm/stream', (options, next) => {
+       this.onMainRequest(options)
+       return next()
+@@ -472,6 +540,48 @@ export class SessionTitleService extends Service {
+     return this.startProvider(session, work, route)
+   }
+ 
++  /**
++   * Regenerate stale titles for an `idle`-mode provider: a session whose
++   * accepted title does not yet cover its latest eligible message, and
++   * whose latest observed event is older than `idleRefreshMs`, is
++   * refreshed at most once per message tail. User-pinned titles, seeded
++   * and subagent sessions, and sessions with title work already pending
++   * or active are never touched. Failed attempts are not retried for
++   * the same tail until the longer of `idleRefreshMs` and 30 minutes
++   * has passed, so a failing provider cannot spin the sweep.
++   */
++  private async sweepIdleTitles(): Promise<void> {
++    if (!this.serviceActive()) return
++    const registration = this.registration
++    if (registration === undefined || registration.closing || registration.provider.automatic !== 'idle') return
++    const now = Date.now()
++    let refreshed = 0
++    for (const [session, state] of this.work) {
++      if (refreshed >= MAX_IDLE_REFRESH_PER_SWEEP) break
++      if (!this.serviceActive()) return
++      if (this.ctx.sessions.get(session.id) !== session) continue
++      if (state.pending !== undefined || state.active !== undefined) continue
++      if (session.header.isSeeded || session.header.origin === 'subagent') continue
++      const current = this.get(session)
++      if (current === undefined || current.source.kind === 'user') continue
++      const input = this.titleInputOf(session)
++      if (input.count < 2 || input.lastSeq === null) continue
++      const covered = current.messageSeqs.length > 0 ? Math.max(...current.messageSeqs) : -1
++      if (covered >= input.lastSeq) continue
++      if (state.lastEventAt === undefined || now - state.lastEventAt < this.config.idleRefreshMs) continue
++      if (state.idleAttempt?.throughSeq === input.lastSeq
++        && now - state.idleAttempt.at < Math.max(this.config.idleRefreshMs, DEFAULT_IDLE_REFRESH_MS)) continue
++      state.idleAttempt = { throughSeq: input.lastSeq, at: now }
++      refreshed++
++      try {
++        await this.refresh(session)
++      } catch (error: unknown) {
++        if (!this.serviceActive()) return
++        this.ctx.logger.warn(`session "${session.id}": idle title generation failed: ${String(error)}`)
++      }
++    }
++  }
++
+   /**
+    * Register the sole optional title provider. Disposal aborts its pending and
+    * active work; a replacement may register once disposal has started, and the
+@@ -789,7 +899,7 @@ export class SessionTitleService extends Service {
+     if (typeof candidate.id !== 'string' || candidate.id.length === 0) {
+       throw new Error('session-title provider id must be a non-empty string')
+     }
+-    if (candidate.automatic !== 'first-prompt' && candidate.automatic !== 'all-prompts') {
++    if (candidate.automatic !== 'first-prompt' && candidate.automatic !== 'all-prompts' && candidate.automatic !== 'idle') {
+       throw new Error('session-title provider automatic mode is invalid')
+     }
+     if (typeof candidate.generate !== 'function') {
+diff --git a/packages/session/session-title/tests/idle.spec.ts b/packages/session/session-title/tests/idle.spec.ts
+new file mode 100644
+index 00000000..8691ee43
+--- /dev/null
++++ b/packages/session/session-title/tests/idle.spec.ts
+@@ -0,0 +1,135 @@
++import AgentRegistry from '@deepseek-ai/dsh-agent'
++import { Context } from '@deepseek-ai/cordis'
++import Timer from '@deepseek-ai/cordis-plugin-timer'
++import { describe, expect, it, onTestFinished, vi } from 'vitest'
++import { createUserMessage } from '@deepseek-ai/dsh-llm'
++import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
++import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
++import SessionTitleService, {
++  SessionTitleProviderId,
++  type SessionTitleProvider,
++  type SessionTitleUserMessage,
++} from '@deepseek-ai/dsh-session-title'
++
++const CONFIG = {
++  fallbackMaxWords: 5,
++  fallbackMaxBytes: 24,
++  maxTitleBytes: 24,
++  idleRefreshMs: 60,
++  idleScanMs: 10,
++} as const
++
++async function settle(ms = 0): Promise<void> {
++  await new Promise(resolve => setTimeout(resolve, ms))
++}
++
++async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
++  const deadline = Date.now() + timeoutMs
++  while (!predicate()) {
++    if (Date.now() > deadline) throw new Error('waitUntil timed out')
++    await settle(10)
++  }
++}
++
++function appendHumanPrompt(session: ReturnType<Context['sessions']['create']>, text: string) {
++  return session.append('user/message', createUserMessage({
++    content: [{ type: 'text', text }],
++    source: { kind: 'user' },
++  }), { surfaceOp: 'append' })
++}
++
++function appendRoute(session: ReturnType<Context['sessions']['create']>): void {
++  session.append('request/header', {
++    header: { config: { provider: 'main-route', model: 'chat-model' } },
++    reason: 'initial',
++  })
++}
++
++async function createContext(withTimer: boolean): Promise<Context> {
++  const ctx = new Context()
++  onTestFinished(() => ctx.fiber.dispose())
++  await ctx.plugin(SessionStore)
++  await ctx.plugin(SessionProjectionRegistry)
++  await ctx.plugin(AgentRegistry)
++  // The title service looks the timer up when it initializes, so the
++  // timer plugin must be in place first — as it is in profile hosts.
++  if (withTimer) await ctx.plugin(Timer)
++  await ctx.plugin(SessionTitleService, CONFIG)
++  return ctx
++}
++
++function registerIdleProvider(ctx: Context): ReturnType<typeof vi.fn> {
++  const generate = vi.fn<SessionTitleProvider['generate']>(async request => ({
++    title: `T${request.messages.length}`,
++    messageSeqs: request.messages.map(message => message.seq),
++  }))
++  ctx.sessionTitle.register({ id: SessionTitleProviderId('idle-fake'), automatic: 'idle', generate })
++  return generate
++}
++
++describe('SessionTitleService idle mode', () => {
++  it('titles once on the first prompt, stays quiet on later prompts, and refreshes after the idle window', async () => {
++    const ctx = await createContext(true)
++    const generate = registerIdleProvider(ctx)
++    const session = ctx.sessions.create(SessionId('idle-main'))
++
++    appendHumanPrompt(session, 'First topic alpha')
++    appendRoute(session)
++    await waitUntil(() => generate.mock.calls.length === 1)
++    await waitUntil(() => ctx.sessionTitle.get(session)?.title === 'T1')
++
++    // A second prompt must not schedule generation in idle mode.
++    appendHumanPrompt(session, 'Second topic beta')
++    appendRoute(session)
++    await settle(50)
++    expect(generate).toHaveBeenCalledTimes(1)
++    expect(ctx.sessionTitle.get(session)?.title).toBe('T1')
++
++    // Once the session has been idle past idleRefreshMs, the sweep
++    // regenerates from all messages and the title catches up.
++    await waitUntil(() => generate.mock.calls.length === 2)
++    await waitUntil(() => ctx.sessionTitle.get(session)?.title === 'T2')
++    expect(generate.mock.calls[1]?.[0].messages.map((message: SessionTitleUserMessage) => message.text)).toEqual([
++      'First topic alpha',
++      'Second topic beta',
++    ])
++
++    // The title now covers the latest message: no further attempts.
++    await settle(200)
++    expect(generate).toHaveBeenCalledTimes(2)
++  })
++
++  it('never refreshes a user-pinned title', async () => {
++    const ctx = await createContext(true)
++    const generate = registerIdleProvider(ctx)
++    const session = ctx.sessions.create(SessionId('idle-pinned'))
++
++    appendHumanPrompt(session, 'First topic alpha')
++    appendRoute(session)
++    await waitUntil(() => ctx.sessionTitle.get(session)?.title === 'T1')
++
++    ctx.sessionTitle.rename(session, 'Mine')
++    appendHumanPrompt(session, 'Second topic beta')
++    appendRoute(session)
++    await settle(250)
++    expect(generate).toHaveBeenCalledTimes(1)
++    expect(ctx.sessionTitle.get(session)?.title).toBe('Mine')
++    expect(ctx.sessionTitle.get(session)?.source.kind).toBe('user')
++  })
++
++  it('without a timer service, an idle provider titles initially and never sweeps', async () => {
++    const ctx = await createContext(false)
++    const generate = registerIdleProvider(ctx)
++    const session = ctx.sessions.create(SessionId('idle-no-timer'))
++
++    appendHumanPrompt(session, 'First topic alpha')
++    appendRoute(session)
++    await waitUntil(() => ctx.sessionTitle.get(session)?.title === 'T1')
++
++    appendHumanPrompt(session, 'Second topic beta')
++    appendRoute(session)
++    await settle(250)
++    expect(generate).toHaveBeenCalledTimes(1)
++    expect(ctx.sessionTitle.get(session)?.title).toBe('T1')
++  })
++})
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 5a36a159..7b8db7cb 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -14022,6 +14022,9 @@ importers:
+       '@deepseek-ai/cordis':
+         specifier: workspace:~
+         version: link:../../../vendor/cordis
++      '@deepseek-ai/cordis-plugin-timer':
++        specifier: workspace:~
++        version: link:../../../vendor/timer
+       '@deepseek-ai/dsh-agent':
+         specifier: workspace:*
+         version: link:../../core/agent
+@@ -19379,10 +19382,12 @@ packages:
+ 
+   '@modelcontextprotocol/server-everything@2026.8.31':
+     resolution: {integrity: sha512-5U3OZh8Xq0Li4nA26l6uNvV9/1suMDuWSn+NjLZIhzinhMY6N3A4DCrxVecBGPf2PsNFKTEv5krxGPRwzxc7jQ==}
++    deprecated: 'Date-based versions are no longer published. This package has resumed semantic versioning at 1.0.0: install the latest version.'
+     hasBin: true
+ 
+   '@modelcontextprotocol/server-filesystem@2026.8.31':
+     resolution: {integrity: sha512-kKaFkyAh6oipvc9+EAbJ552JafnMnOq5nzmzWkp1jJdBhTAAGpmIpWihUG1+rfNhmEFM98gUZDdCHCDD4v6a7Q==}
++    deprecated: 'Date-based versions are no longer published. This package has resumed semantic versioning at 1.0.0: install the latest version.'
+     hasBin: true
+ 
+   '@modelcontextprotocol/server@2.2.0':

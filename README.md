@@ -48,9 +48,9 @@ titles use each session's own logged route, like the stock provider.
 
 ## Upstream
 
-This behavior is also implemented in-tree as a proposed third
-automatic mode (idle) for the session-title service, on a fork
-branch of deepseek-ai/deepseek-harness (which currently does not
-accept external PRs; a Discussion proposal is being prepared):
-
-https://github.com/2001Y/deepseek-harness/tree/feat/session-title-idle-mode
+An in-tree version of this behavior (a third automatic mode,
+idle, for the session-title service) was prototyped against
+deepseek-ai/deepseek-harness and is kept here as
+upstream-idle-mode.patch. It is shelved for now: the upstream
+repository does not accept external PRs, and the maintainer
+prefers the plugin form.
