@@ -49,7 +49,7 @@ titles use each session's own logged route, like the stock provider.
 ## Upstream
 
 This behavior is also implemented in-tree as a proposed third
-automatic mode () for the session-title service, on a fork
+automatic mode (idle) for the session-title service, on a fork
 branch of deepseek-ai/deepseek-harness (which currently does not
 accept external PRs; a Discussion proposal is being prepared):
 
