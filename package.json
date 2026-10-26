@@ -11,6 +11,7 @@
   },
   "files": [
     "lib/index.js",
+    "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
@@ -34,5 +35,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/2001Y/dsh-session-title-idle-refresh.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }

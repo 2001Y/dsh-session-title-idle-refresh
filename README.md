@@ -20,24 +20,23 @@ DSH (DeepSeek Harness 0.2.1) session-title plugin built for Yoshiki Tamura.
 
 ## Install (web profile)
 
-The stock provider row must be disabled — only one title provider
-may register:
-
-```yaml
-# ~/.dsh/profiles/web/cordis.patch.yml
-- id: session-title-llm
-  disabled: true
-- insert:
-    - id: session-title-idle-refresh
-      name: dsh-session-title-idle-refresh
-      config:
-        idleMs: 1800000
-        scanMs: 60000
-```
-
 ```sh
 dsh plugin --profile web add dsh-session-title-idle-refresh
 # then restart dsh web
+```
+
+The package ships a bundle patch (`cordis.patch.yml`) that inserts
+the provider row with the defaults below and disables the stock
+`session-title-llm` row — only one title provider may be registered,
+and this plugin replaces it (the same swap pattern the official
+session-titles bundle uses for its all-prompts provider). To tune,
+restate the row in your profile's `cordis.patch.yml`:
+
+```yaml
+- id: session-title-idle-refresh
+  config:
+    idleMs: 1800000
+    scanMs: 60000
 ```
 
 ## Config defaults

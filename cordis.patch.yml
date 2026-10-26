@@ -1,0 +1,22 @@
+# dsh-session-title-idle-refresh bundle patch.
+#
+# Inserting this provider REPLACES the stock first-prompt provider:
+# only one session-title provider may be registered, so the stock
+# row is disabled here (the same pattern the official session-titles
+# bundle uses to swap in the all-prompts provider).
+- id: session-title-llm
+  disabled: true
+
+- insert:
+    - id: session-title-idle-refresh
+      name: dsh-session-title-idle-refresh
+      config:
+        idleMs: 1800000
+        scanMs: 60000
+        minMessages: 2
+        maxPerScan: 3
+        targetWords: 5
+        targetCjkCharacters: 10
+        maxInputBytes: 16384
+        maxOutputTokens: 4096
+        timeoutMs: 60000
